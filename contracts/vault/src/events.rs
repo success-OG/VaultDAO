@@ -368,6 +368,14 @@ pub fn emit_batch_executed(env: &Env, executor: &Address, executed_count: u32, f
     );
 }
 
+/// Emit when a batch execution partially failed and was rolled back
+pub fn emit_batch_rolled_back(env: &Env, executor: &Address, rolled_back_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "batch_rolled_back"),),
+        (executor.clone(), rolled_back_count),
+    );
+}
+
 // ============================================================================
 // Notification Events (feature/execution-notifications)
 // ============================================================================
@@ -1078,4 +1086,36 @@ pub fn emit_dispute_resolved(env: &Env, dispute_id: u64, admin: &Address, resolu
         (Symbol::new(env, "dispute_resolved"), dispute_id),
         (admin.clone(), resolution),
     );
+}
+
+// ============================================================================
+// Bridge Events (feature/cross-chain-bridge)
+// ============================================================================
+
+/// Emit when a bridge transfer proposal is created
+pub fn emit_bridge_proposed(env: &Env, proposal_id: u64, proposer: &Address, asset_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_proposed"), proposal_id),
+        (proposer.clone(), asset_count),
+    );
+}
+
+/// Emit when a bridge proposal is executed
+pub fn emit_bridge_executed(env: &Env, proposal_id: u64, executor: &Address, success_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_executed"), proposal_id),
+        (executor.clone(), success_count),
+    );
+}
+
+/// Emit when bridge configuration is updated
+pub fn emit_bridge_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "bridge_cfg_updated"),), admin.clone());
+}
+
+/// Emit when reputation config is updated
+pub fn emit_reputation_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "rep_config_updated"),), admin.clone());
 }

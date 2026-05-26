@@ -26,9 +26,9 @@ use crate::types::{
     Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot,
     FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
     NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalTemplate,
-    RecoveryProposal, Reputation, RetryState, Role, RoleAssignment, StakeRecord, StakingConfig,
-    Subscription, SwapProposal, SwapResult, TimeWeightedConfig, TokenLock, VaultMetrics,
-    VelocityConfig, VotingStrategy,
+    RecoveryProposal, Reputation, ReputationConfig, RetryState, Role, RoleAssignment, StakeRecord,
+    StakingConfig, Subscription, SwapProposal, SwapResult, TimeWeightedConfig, TokenLock,
+    VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig, CrossChainProposal,
 };
 
 /// Core storage key definitions (kept minimal to avoid size limits)
@@ -214,6 +214,14 @@ pub enum FeatureKey {
     NextSubscriptionId,
     /// Subscription IDs indexed by subscriber address -> Vec<u64>
     SubscriberIndex(Address),
+    /// Reputation decay configuration -> ReputationConfig
+    ReputationConfig,
+    /// Bridge configuration -> BridgeConfig
+    BridgeConfig,
+    /// Cross-chain proposal -> CrossChainProposal
+    CrossChainProposal(u64),
+    /// Re-entrancy guard for bridge execution (proposal_id) -> bool
+    BridgeLock(u64),
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -984,33 +992,65 @@ pub fn set_reputation(env: &Env, addr: &Address, rep: &Reputation) {
         .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
 }
 
-/// Apply time-based decay to a reputation score.
-/// Every 30 days without activity, score drifts toward the neutral 500 by 5%.
+/// Apply time-based decay to a reputation score using the admin-configured
+/// `ReputationConfig`.
+///
+/// Decay formula (integer approximation of exponential half-life):
+///   For each complete half-life period elapsed:
+///     distance = score - decay_min_score
+///     score    = decay_min_score + (distance / 2)
+///
+/// This is equivalent to `score ≈ decay_min_score + (score - decay_min_score) * 0.5^periods`.
+///
+/// The function is deterministic: given the same `last_decay_ledger` and
+/// current ledger sequence it always produces the same result.
+/// `decay_min_score` is never breached.
 pub fn apply_reputation_decay(env: &Env, rep: &mut Reputation) {
     let current_ledger = env.ledger().sequence() as u64;
-    // ~30 days in ledgers
-    const DECAY_INTERVAL: u64 = 17_280 * 30;
+    let cfg = get_reputation_config(env);
+
+    // A half-life of 0 means decay is disabled.
+    if cfg.decay_half_life_ledgers == 0 {
+        rep.last_decay_ledger = current_ledger;
+        return;
+    }
+
     let elapsed = current_ledger.saturating_sub(rep.last_decay_ledger);
-    let periods = elapsed / DECAY_INTERVAL;
+    let periods = elapsed / cfg.decay_half_life_ledgers;
     if periods == 0 {
         rep.last_decay_ledger = current_ledger;
         return;
     }
-    // Move score toward neutral (500) by 5% per period
+
+    // Apply one halving per period, clamped to decay_min_score.
     for _ in 0..periods {
-        match rep.score.cmp(&500) {
-            core::cmp::Ordering::Greater => {
-                let diff = rep.score - 500;
-                rep.score = rep.score.saturating_sub(diff / 20 + 1);
-            }
-            core::cmp::Ordering::Less => {
-                let diff = 500 - rep.score;
-                rep.score = rep.score.saturating_add(diff / 20 + 1);
-            }
-            core::cmp::Ordering::Equal => {}
+        if rep.score <= cfg.decay_min_score {
+            rep.score = cfg.decay_min_score;
+            break;
         }
+        let distance = rep.score - cfg.decay_min_score;
+        // Integer halving: distance / 2 (rounds down, so score drifts toward floor)
+        rep.score = cfg.decay_min_score + (distance / 2);
     }
+
     rep.last_decay_ledger = current_ledger;
+}
+
+// ============================================================================
+// Reputation Config
+// ============================================================================
+
+pub fn get_reputation_config(env: &Env) -> ReputationConfig {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::ReputationConfig)
+        .unwrap_or_else(ReputationConfig::default)
+}
+
+pub fn set_reputation_config(env: &Env, config: &ReputationConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::ReputationConfig, config);
 }
 
 // ============================================================================
@@ -1156,6 +1196,66 @@ pub fn get_gas_config(env: &Env) -> GasConfig {
 
 pub fn set_gas_config(env: &Env, config: &GasConfig) {
     env.storage().instance().set(&FeatureKey::GasConfig, config);
+}
+
+// ============================================================================
+// Batch Transaction Storage
+// ============================================================================
+
+pub fn get_batch(env: &Env, batch_id: u64) -> Result<crate::types::BatchTransaction, VaultError> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::Batch(batch_id))
+        .ok_or(VaultError::ProposalNotFound)
+}
+
+pub fn set_batch(env: &Env, batch: &crate::types::BatchTransaction) {
+    let key = FeatureKey::Batch(batch.id);
+    env.storage().persistent().set(&key, batch);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_next_batch_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::BatchIdCounter)
+        .unwrap_or(1)
+}
+
+pub fn increment_batch_id(env: &Env) -> u64 {
+    let id = get_next_batch_id(env);
+    env.storage()
+        .instance()
+        .set(&FeatureKey::BatchIdCounter, &(id + 1));
+    id
+}
+
+pub fn set_batch_result(env: &Env, batch_id: u64, result: &crate::types::BatchExecutionResult) {
+    let key = FeatureKey::BatchResult(batch_id);
+    env.storage().persistent().set(&key, result);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_batch_result(env: &Env, batch_id: u64) -> Option<crate::types::BatchExecutionResult> {
+    env.storage().persistent().get(&FeatureKey::BatchResult(batch_id))
+}
+
+pub fn set_batch_rollback(env: &Env, batch_id: u64, entries: &Vec<(Address, i128)>) {
+    let key = FeatureKey::BatchRollback(batch_id);
+    env.storage().persistent().set(&key, entries);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, INSTANCE_TTL_THRESHOLD, INSTANCE_TTL);
+}
+
+pub fn get_batch_rollback(env: &Env, batch_id: u64) -> Option<Vec<(Address, i128)>> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::BatchRollback(batch_id))
 }
 
 pub fn get_execution_fee_estimate(env: &Env, proposal_id: u64) -> Option<ExecutionFeeEstimate> {
@@ -2021,4 +2121,53 @@ pub fn add_to_subscriber_index(env: &Env, subscriber: &Address, subscription_id:
     env.storage()
         .persistent()
         .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Bridge Storage
+// ============================================================================
+
+pub fn get_bridge_config(env: &Env) -> Option<BridgeConfig> {
+    env.storage().instance().get(&FeatureKey::BridgeConfig)
+}
+
+pub fn set_bridge_config(env: &Env, config: &BridgeConfig) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::BridgeConfig, config);
+}
+
+pub fn get_cross_chain_proposal(env: &Env, proposal_id: u64) -> Option<CrossChainProposal> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::CrossChainProposal(proposal_id))
+}
+
+pub fn set_cross_chain_proposal(env: &Env, proposal_id: u64, proposal: &CrossChainProposal) {
+    let key = FeatureKey::CrossChainProposal(proposal_id);
+    env.storage().persistent().set(&key, proposal);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+/// Acquire the bridge re-entrancy lock for a proposal.
+/// Returns `true` if the lock was acquired (was not already held), `false` otherwise.
+pub fn acquire_bridge_lock(env: &Env, proposal_id: u64) -> bool {
+    let key = FeatureKey::BridgeLock(proposal_id);
+    if env.storage().temporary().get::<_, bool>(&key).unwrap_or(false) {
+        return false; // already locked
+    }
+    env.storage().temporary().set(&key, &true);
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS);
+    true
+}
+
+/// Release the bridge re-entrancy lock for a proposal.
+pub fn release_bridge_lock(env: &Env, proposal_id: u64) {
+    env.storage()
+        .temporary()
+        .remove(&FeatureKey::BridgeLock(proposal_id));
 }
