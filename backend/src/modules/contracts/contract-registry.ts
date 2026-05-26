@@ -17,13 +17,18 @@ export class ContractRegistry {
   private contracts: ContractInfo[] = [];
 
   constructor(private readonly env: BackendEnv) {
-    const ids = env.contractIds && env.contractIds.length > 0 ? env.contractIds : [env.contractId];
+    const ids =
+      env.contractIds && env.contractIds.length > 0
+        ? env.contractIds
+        : [env.contractId];
     this.contracts = ids.map((id) => ({ id }));
   }
 
   public async discover(): Promise<ContractInfo[]> {
     // TODO: Implement RPC-based discovery using Soroban RPC if desired.
-    this.logger.info("contract discovery completed", { count: this.contracts.length });
+    this.logger.info("contract discovery completed", {
+      count: this.contracts.length,
+    });
     return this.contracts;
   }
 

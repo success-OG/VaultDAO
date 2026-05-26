@@ -1,11 +1,19 @@
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
-import { diag, DiagConsoleLogger, DiagLogLevel, trace } from "@opentelemetry/api";
+import {
+  diag,
+  DiagConsoleLogger,
+  DiagLogLevel,
+  trace,
+} from "@opentelemetry/api";
 
 let sdk: NodeSDK | null = null;
 
-export function initTracing(serviceName = "vaultdao-backend", collectorUrl?: string) {
+export function initTracing(
+  serviceName = "vaultdao-backend",
+  collectorUrl?: string,
+) {
   try {
     diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.INFO);
 
@@ -20,7 +28,10 @@ export function initTracing(serviceName = "vaultdao-backend", collectorUrl?: str
     sdk.start();
   } catch (e) {
     // Best-effort: don't crash if tracing fails to initialize
-    console.warn("tracing failed to initialize", e instanceof Error ? e.message : e);
+    console.warn(
+      "tracing failed to initialize",
+      e instanceof Error ? e.message : e,
+    );
   }
 }
 

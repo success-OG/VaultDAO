@@ -151,9 +151,10 @@ export function startServer(
       : new FileCursorAdapter();
 
   // Multi-contract indexing: determine contract IDs to index
-  const contractIds = env.contractIds && env.contractIds.length > 0
-    ? env.contractIds
-    : [env.contractId];
+  const contractIds =
+    env.contractIds && env.contractIds.length > 0
+      ? env.contractIds
+      : [env.contractId];
 
   const pollers: EventPollingService[] = [];
   for (const cid of contractIds) {

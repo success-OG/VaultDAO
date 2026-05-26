@@ -149,7 +149,9 @@ export function createApp(env: BackendEnv, runtime: BackendRuntime) {
   v1Router.use("/health", createDetailedHealthRouter(env, runtime));
 
   // Contracts listing
-  const registry = new (await import("./modules/contracts/contract-registry.js")).default(env);
+  const registry = new (
+    await import("./modules/contracts/contract-registry.js")
+  ).default(env);
   v1Router.use("/contracts", createContractsRouter(registry));
 
   v1Router.use(
@@ -179,11 +181,7 @@ export function createApp(env: BackendEnv, runtime: BackendRuntime) {
     createTransactionsRouter(runtime.transactionsService, env.contractId),
   );
 
-  v1Router.use(
-    "/audit",
-    authMiddleware,
-    createAuditRouter(env.sorobanRpcUrl),
-  );
+  v1Router.use("/audit", authMiddleware, createAuditRouter(env.sorobanRpcUrl));
 
   if (runtime.notificationQueue) {
     v1Router.use(
